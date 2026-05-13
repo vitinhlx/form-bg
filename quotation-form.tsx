@@ -10,6 +10,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import * as XLSX from 'xlsx'
 import { jsPDF } from 'jspdf'
 import 'jspdf-autotable'
+import { createClient } from '@/lib/supabase/client'
 
 type QuotationItem = {
   id: number
@@ -35,7 +36,7 @@ const suggestionItems = [
 
 const suggestedUnits = ["Cái", "Bộ", "m2", "md"]
 
-export default function QuotationForm() {
+export default function QuotationForm({ user }: { user?: any }) {
   const [items, setItems] = useState<QuotationItem[]>([])
   const [description, setDescription] = useState('')
   const [quantity, setQuantity] = useState('')
@@ -71,6 +72,9 @@ export default function QuotationForm() {
   const [tempFactoryAddress, setTempFactoryAddress] = useState('')
   const [tempFactoryHotline, setTempFactoryHotline] = useState('')
   const [tempFactoryEmail, setTempFactoryEmail] = useState('')
+
+  const [autoSaveStatus, setAutoSaveStatus] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle')
+  const autoSaveTimeoutRef = useRef<NodeJS.Timeout | null>(null)
 
   useEffect(() => {
     if (description) {
@@ -111,6 +115,122 @@ export default function QuotationForm() {
       setFactoryEmail(info.email)
     }
   }, [])
+
+  // Auto-save to cloud
+  useEffect(() => {
+    if (!user) return
+
+    const autoSave = async () => {
+      try {
+        setAutoSaveStatus('saving')
+        const supabase = createClient()
+
+        const quotationData = {
+          items,
+          pageTitle,
+          factoryName,
+          factoryAddress,
+          factoryHotline,
+          factoryEmail,
+          editableNotes
+        }
+
+        // Check if quotation exists
+        const { data: existingData, error: fetchError } = await supabase
+          .from('quotations')
+          .select('id')
+          .eq('user_id', user.id)
+          .single()
+
+        if (fetchError && fetchError.code !== 'PGRST116') {
+          throw fetchError
+        }
+
+        if (existingData) {
+          // Update existing
+          const { error: updateError } = await supabase
+            .from('quotations')
+            .update({
+              data: quotationData,
+              updated_at: new Date().toISOString()
+            })
+            .eq('user_id', user.id)
+
+          if (updateError) throw updateError
+        } else {
+          // Insert new
+          const { error: insertError } = await supabase
+            .from('quotations')
+            .insert({
+              user_id: user.id,
+              data: quotationData
+            })
+
+          if (insertError) throw insertError
+        }
+
+        setAutoSaveStatus('saved')
+        setTimeout(() => setAutoSaveStatus('idle'), 2000)
+      } catch (error) {
+        console.error('Auto-save error:', error)
+        setAutoSaveStatus('error')
+        setTimeout(() => setAutoSaveStatus('idle'), 3000)
+      }
+    }
+
+    // Debounce auto-save
+    if (autoSaveTimeoutRef.current) {
+      clearTimeout(autoSaveTimeoutRef.current)
+    }
+
+    autoSaveTimeoutRef.current = setTimeout(autoSave, 2000)
+
+    return () => {
+      if (autoSaveTimeoutRef.current) {
+        clearTimeout(autoSaveTimeoutRef.current)
+      }
+    }
+  }, [user, items, pageTitle, factoryName, factoryAddress, factoryHotline, factoryEmail, editableNotes])
+
+  // Load from cloud when user logs in
+  useEffect(() => {
+    if (!user) return
+
+    const loadFromCloud = async () => {
+      try {
+        const supabase = createClient()
+        const { data, error } = await supabase
+          .from('quotations')
+          .select('data')
+          .eq('user_id', user.id)
+          .single()
+
+        if (error && error.code !== 'PGRST116') {
+          throw error
+        }
+
+        if (data && data.data) {
+          const quotationData = data.data
+          setItems(quotationData.items || [])
+          setPageTitle(quotationData.pageTitle || pageTitle)
+          setFactoryName(quotationData.factoryName || factoryName)
+          setFactoryAddress(quotationData.factoryAddress || factoryAddress)
+          setFactoryHotline(quotationData.factoryHotline || factoryHotline)
+          setFactoryEmail(quotationData.factoryEmail || factoryEmail)
+          setEditableNotes(quotationData.editableNotes || editableNotes)
+        }
+      } catch (error) {
+        console.error('Error loading from cloud:', error)
+        // Fall back to localStorage if available
+        const savedItems = localStorage.getItem('quotationItems')
+        if (savedItems) {
+          setItems(JSON.parse(savedItems))
+        }
+      }
+    }
+
+    loadFromCloud()
+  }, [user])
 
   const addItem = () => {
     if (description && quantity && unit && unitPrice) {
@@ -462,6 +582,31 @@ export default function QuotationForm() {
 
   return (
     <div className="container mx-auto p-4">
+      {user && autoSaveStatus !== 'idle' && (
+        <div className="mb-4 p-3 rounded-lg flex items-center gap-2 print:hidden" style={{
+          backgroundColor: autoSaveStatus === 'saved' ? '#f0fdf4' : autoSaveStatus === 'error' ? '#fef2f2' : '#f0f9ff',
+          color: autoSaveStatus === 'saved' ? '#166534' : autoSaveStatus === 'error' ? '#991b1b' : '#0c4a6e'
+        }}>
+          {autoSaveStatus === 'saving' && (
+            <>
+              <div className="animate-spin rounded-full h-4 w-4 border-t-2 border-b-2" style={{borderColor: 'currentColor'}}></div>
+              <span>Đang lưu...</span>
+            </>
+          )}
+          {autoSaveStatus === 'saved' && (
+            <>
+              <span>✓</span>
+              <span>Đã lưu trên cloud</span>
+            </>
+          )}
+          {autoSaveStatus === 'error' && (
+            <>
+              <span>⚠</span>
+              <span>Lỗi khi lưu. Vui lòng kiểm tra kết nối.</span>
+            </>
+          )}
+        </div>
+      )}
       <div ref={printContentRef}>
         <div className="mb-8 text-center header">
           <h1 className="text-3xl font-bold mb-2">{pageTitle}</h1>
